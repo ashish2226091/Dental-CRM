@@ -9,6 +9,10 @@ export const createPool = () => {
     user: process.env.SQL_USER,
     password: process.env.SQL_PASSWORD,
     database: process.env.SQL_DB_NAME,
+    port: Number(process.env.SQL_PORT) || 5432,
+    ssl: process.env.NODE_ENV === 'production'
+      ? { rejectUnauthorized: false }
+      : (process.env.SQL_SSL === 'true' ? { rejectUnauthorized: false } : false),
     connectionTimeoutMillis: 15000,
   });
 };

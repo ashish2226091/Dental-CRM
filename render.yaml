@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: dental-crm
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: SQL_HOST
+        sync: false
+      - key: SQL_PORT
+        value: 5432
+      - key: SQL_USER
+        sync: false
+      - key: SQL_PASSWORD
+        sync: false
+      - key: SQL_DB_NAME
+        sync: false
+      - key: SQL_SSL
+        value: "true"

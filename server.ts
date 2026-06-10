@@ -8,7 +8,7 @@ import { db } from './src/db/index.ts';
 import * as schema from './src/db/schema.ts';
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
