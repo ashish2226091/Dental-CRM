@@ -1,0 +1,6 @@
+{
+  "name": "Dental Clinic CRM",
+  "description": "Dental Clinic Practice Management CRM with patient journey tracking, financial/EMI validations, and an AI intelligence co-pilot.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
