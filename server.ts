@@ -1,16 +1,149 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import { Patient, PatientStage, DoctorNotification } from './src/types';
+import { db } from './src/db/index.ts';
+import * as schema from './src/db/schema.ts';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-// In-memory persistent database for the CRM session
-let patients: Patient[] = [];
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+
+
+const DEFAULT_SEED_PATIENTS: Patient[] = [
+  {
+    patient_id: "OPD_0255",
+    salutation: "Mr.",
+    first_name: "Ashish",
+    last_name: "Kumar",
+    gender: "Male",
+    age_dob: "25 years old",
+    age_calculated: 25,
+    mobile: "7777939935",
+    category: "VIP",
+    last_visit: "07-04-2026",
+    current_stage: "STAGE_4: TREATMENT_ACCEPTED",
+    history: [
+      "Logged by Receptionist | Patient Ashish Kumar registered with VIP category.",
+      "Logged by Coordinator | Case sheet loaded: Root Canal Treatment proposed.",
+      "Logged by Dentist | Treatment ACCEPTED. Patient chose Clinic EMI scheme."
+    ],
+    financials: {
+      total_cost: 16000,
+      payment_mode: "Clinic EMI",
+      payment_status: "Active EMI",
+      emi_months: 6,
+      emi_monthly_amount: 2667
+    },
+    active_treatment_plans: [
+      {
+        plan_id: "plan_9022",
+        plan_name: "Root Canal + Zirconia Crown Combo Plan",
+        status: "Treatment in Progress",
+        billing_items: [
+          {
+            tooth_no: [46],
+            procedure_name: "Root Canal Treatment (RCT)",
+            base_rate: 4000,
+            count: 1,
+            discount_percent: 0,
+            gst_percent: 18,
+            final_total: 4720
+          },
+          {
+            tooth_no: [46],
+            procedure_name: "Crown/Cap",
+            base_rate: 5000,
+            count: 1,
+            discount_percent: 10,
+            gst_percent: 18,
+            final_total: 5310
+          },
+          {
+            tooth_no: [14, 15],
+            procedure_name: "Composite Filling",
+            base_rate: 1500,
+            count: 2,
+            discount_percent: 10,
+            gst_percent: 18,
+            final_total: 3186
+          }
+        ],
+        visit_logs: [
+          {
+            visit_id: "visit_4011",
+            visit_number: "V1",
+            date: "12-04-2026",
+            procedure_step: "Access Opening",
+            assigned_teeth: [46],
+            conducted_by: "Dr. Sarah Jenkins",
+            assisted_by: "Nurse Clara",
+            remarks: "Pulpectomy done, temporary dressing applied."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    patient_id: "OPD_1048",
+    salutation: "Mrs.",
+    first_name: "Priya",
+    last_name: "Sharma",
+    gender: "Female",
+    age_dob: "45 years old",
+    age_calculated: 45,
+    mobile: "9876543219",
+    category: "Diabetic",
+    last_visit: "10-05-2026",
+    current_stage: "STAGE_5: PAYMENT_COMPLETED",
+    history: [
+      "Logged by Coordinator | Custom full mouth scaling and polishing done.",
+      "Logged by Accountant | Cash payment collected: Fully Paid."
+    ],
+    financials: {
+      total_cost: 1000,
+      payment_mode: "Cash",
+      payment_status: "Fully Paid",
+      emi_months: 0,
+      emi_monthly_amount: 0
+    },
+    active_treatment_plans: [
+      {
+        plan_id: "plan_3045",
+        plan_name: "Scaling Polishing Plan",
+        status: "Treatment Done",
+        billing_items: [
+          {
+            tooth_no: [11, 12, 21, 22],
+            procedure_name: "Scaling & Polishing",
+            base_rate: 1000,
+            count: 1,
+            discount_percent: 0,
+            gst_percent: 0,
+            final_total: 1000
+          }
+        ],
+        visit_logs: []
+      }
+    ]
+  }
+];
+
+// In-memory persistent database for the CRM session (keeps working instantly and cloud-syncs)
+let patients: Patient[] = [...DEFAULT_SEED_PATIENTS];
 
 let notifications: DoctorNotification[] = [];
 
@@ -31,10 +164,252 @@ let doctorRegistry: DoctorRegistryItem[] = [
   { name: "Dr. Rohan Das", specialty: "Endodontics", fees: 1200, phone: "9812345678", email: "rohan@clinic.com", med_reg: "DC-54321", qualifications: "MDS Endodontics", hospitals: ["ECity"] }
 ];
 
+async function loadDataFromFirestore() {
+  try {
+    // 1. Load patients
+    const dbPatients = await db.select().from(schema.patients);
+    if (dbPatients.length > 0) {
+      patients = dbPatients.map(p => ({
+        patient_id: p.patient_id,
+        first_name: p.first_name,
+        last_name: p.last_name,
+        gender: p.gender,
+        age_dob: p.age_dob,
+        current_stage: p.current_stage as PatientStage,
+        history: p.history,
+        financials: p.financials,
+        salutation: p.salutation ?? undefined,
+        mobile: p.mobile ?? undefined,
+        email: p.email ?? undefined,
+        dob: p.dob ?? undefined,
+        age_calculated: p.age_calculated ?? undefined,
+        treatment_plan_markdown: p.treatment_plan_markdown ?? undefined,
+        treatment_plan_json: p.treatment_plan_json ?? undefined,
+        active_treatment_plans: (p.active_treatment_plans as any) ?? undefined,
+        selected_payment_mode: p.selected_payment_mode ?? undefined,
+        category: p.category ?? undefined,
+        last_visit: p.last_visit ?? undefined,
+        appointment_booking: (p.appointment_booking as any) ?? undefined,
+      }));
+      console.log(`Loaded ${patients.length} patients from SQL database.`);
+    } else {
+      // Seed default patients
+      for (const p of DEFAULT_SEED_PATIENTS) {
+        await db.insert(schema.patients).values({
+          patient_id: p.patient_id,
+          salutation: p.salutation ?? null,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          gender: p.gender,
+          mobile: p.mobile ?? null,
+          email: p.email ?? null,
+          dob: p.dob ?? null,
+          age_calculated: p.age_calculated ?? null,
+          age_dob: p.age_dob,
+          current_stage: p.current_stage,
+          history: p.history,
+          financials: p.financials,
+          treatment_plan_markdown: p.treatment_plan_markdown ?? null,
+          treatment_plan_json: p.treatment_plan_json ?? null,
+          active_treatment_plans: p.active_treatment_plans ?? null,
+          selected_payment_mode: p.selected_payment_mode ?? null,
+          category: p.category ?? null,
+          last_visit: p.last_visit ?? null,
+          appointment_booking: p.appointment_booking ?? null,
+        });
+      }
+      patients = [...DEFAULT_SEED_PATIENTS];
+      console.log('Seeded default patients into empty SQL Database.');
+    }
+
+    // 2. Load doctors
+    const dbDoctors = await db.select().from(schema.doctors);
+    if (dbDoctors.length > 0) {
+      doctorRegistry = dbDoctors.map(d => ({
+        name: d.name,
+        specialty: d.specialty,
+        fees: d.fees,
+        phone: d.phone ?? undefined,
+        email: d.email ?? undefined,
+        med_reg: d.med_reg ?? undefined,
+        qualifications: d.qualifications ?? undefined,
+        hospitals: d.hospitals as string[] ?? undefined,
+      }));
+      console.log(`Loaded ${doctorRegistry.length} doctors from SQL database.`);
+    } else {
+      for (const d of doctorRegistry) {
+        const id = d.name.replace(/\s+/g, '_').toLowerCase();
+        await db.insert(schema.doctors).values({
+          id,
+          name: d.name,
+          specialty: d.specialty,
+          fees: d.fees,
+          phone: d.phone ?? null,
+          email: d.email ?? null,
+          med_reg: d.med_reg ?? null,
+          qualifications: d.qualifications ?? null,
+          hospitals: d.hospitals ?? null,
+        });
+      }
+      console.log('Seeded initial doctors into SQL database.');
+    }
+
+    // 3. Load notifications
+    const dbNotifications = await db.select().from(schema.notifications);
+    if (dbNotifications.length > 0) {
+      notifications = dbNotifications.map(n => ({
+        id: n.id,
+        timestamp: n.timestamp,
+        patient_name: n.patient_name,
+        transitioned_to: n.transitioned_to,
+        action_by: n.action_by,
+        summary: n.summary,
+      }));
+      notifications.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      console.log(`Loaded ${notifications.length} notifications from SQL database.`);
+    }
+
+    // 4. Load/Seed registered users to the SQL DB
+    const dbUsers = await db.select().from(schema.users);
+    if (dbUsers.length > 0) {
+      registeredUsers = dbUsers.map(u => ({
+        email: u.email,
+        mobile_no: u.mobileNo ?? '',
+        first_name: u.firstName ?? '',
+        last_name: u.lastName ?? '',
+        gender: u.gender ?? '',
+        age_dob: u.ageDob ?? '',
+        type: (u.type as 'doctor' | 'staff') ?? 'staff',
+      }));
+      console.log(`Loaded ${registeredUsers.length} users from SQL database.`);
+    } else {
+      for (const u of registeredUsers) {
+        await db.insert(schema.users).values({
+          id: u.email.toLowerCase(),
+          email: u.email.toLowerCase(),
+          mobileNo: u.mobile_no,
+          firstName: u.first_name,
+          lastName: u.last_name,
+          gender: u.gender,
+          ageDob: u.age_dob,
+          type: u.type,
+        });
+      }
+      console.log('Seeded initial users into SQL database.');
+    }
+  } catch (error) {
+    console.error('Error loading data from SQL Database:', error);
+  }
+}
+
+async function savePatientToFirestore(patient: Patient) {
+  try {
+    const values = {
+      patient_id: patient.patient_id,
+      salutation: patient.salutation ?? null,
+      first_name: patient.first_name,
+      last_name: patient.last_name,
+      gender: patient.gender,
+      mobile: patient.mobile ?? null,
+      email: patient.email ?? null,
+      dob: patient.dob ?? null,
+      age_calculated: patient.age_calculated ?? null,
+      age_dob: patient.age_dob,
+      current_stage: patient.current_stage,
+      history: patient.history,
+      financials: patient.financials,
+      treatment_plan_markdown: patient.treatment_plan_markdown ?? null,
+      treatment_plan_json: patient.treatment_plan_json ?? null,
+      active_treatment_plans: patient.active_treatment_plans ?? null,
+      selected_payment_mode: patient.selected_payment_mode ?? null,
+      category: patient.category ?? null,
+      last_visit: patient.last_visit ?? null,
+      appointment_booking: patient.appointment_booking ?? null,
+    };
+
+    await db.insert(schema.patients)
+      .values(values)
+      .onConflictDoUpdate({
+        target: schema.patients.patient_id,
+        set: values,
+      });
+
+    console.log(`Saved patient ${patient.patient_id} to SQL Database.`);
+  } catch (error) {
+    console.error(`Database save error for patient ${patient.patient_id}:`, error);
+  }
+}
+
+async function saveDoctorToFirestore(doctor: DoctorRegistryItem) {
+  try {
+    const id = doctor.name.replace(/\s+/g, '_').toLowerCase();
+    const values = {
+      id,
+      name: doctor.name,
+      specialty: doctor.specialty,
+      fees: doctor.fees,
+      phone: doctor.phone ?? null,
+      email: doctor.email ?? null,
+      med_reg: doctor.med_reg ?? null,
+      qualifications: doctor.qualifications ?? null,
+      hospitals: doctor.hospitals ?? null,
+    };
+
+    await db.insert(schema.doctors)
+      .values(values)
+      .onConflictDoUpdate({
+        target: schema.doctors.id,
+        set: values,
+      });
+
+    console.log(`Saved doctor ${doctor.name} to SQL Database.`);
+  } catch (error) {
+    console.error(`Database save error for doctor ${doctor.name}:`, error);
+  }
+}
+
+async function saveNotificationToFirestore(notif: DoctorNotification) {
+  try {
+    const values = {
+      id: notif.id,
+      timestamp: notif.timestamp,
+      patient_name: notif.patient_name,
+      transitioned_to: notif.transitioned_to,
+      action_by: notif.action_by,
+      summary: notif.summary,
+    };
+
+    await db.insert(schema.notifications)
+      .values(values)
+      .onConflictDoUpdate({
+        target: schema.notifications.id,
+        set: values,
+      });
+
+    console.log(`Saved notification ${notif.id} to SQL Database.`);
+  } catch (error) {
+    console.error(`Database save error for notification ${notif.id}:`, error);
+  }
+}
+
+async function resetFirestoreCollections() {
+  try {
+    await db.delete(schema.patients);
+    await db.delete(schema.notifications);
+    console.log('Reset patients and notifications collections in SQL Database.');
+  } catch (error) {
+    console.error('Database delete error in reset:', error);
+  }
+}
+
+// Automatically load database on startup
+loadDataFromFirestore().catch(err => console.error("Error running initial DB load:", err));
+
 // Helper to calculate a unique patient ID
 function generateId(): string {
   return 'patient_' + Math.floor(1000 + Math.random() * 9000);
 }
+
 
 // --------------------------------------------------------------------------
 // REST APIs for patients & notifications
@@ -58,6 +433,7 @@ app.post('/api/doctors', (req: Request, res: Response) => {
   }
   const fValue = Number(fees) || 500;
   const existing = doctorRegistry.find(d => d.name.toLowerCase() === name.toLowerCase());
+  let targetDoc: DoctorRegistryItem;
   if (existing) {
     existing.specialty = specialty;
     existing.fees = fValue;
@@ -66,8 +442,9 @@ app.post('/api/doctors', (req: Request, res: Response) => {
     if (med_reg) existing.med_reg = med_reg;
     if (qualifications) existing.qualifications = qualifications;
     if (hospitals) existing.hospitals = hospitals;
+    targetDoc = existing;
   } else {
-    doctorRegistry.push({
+    targetDoc = {
       name,
       specialty,
       fees: fValue,
@@ -76,15 +453,25 @@ app.post('/api/doctors', (req: Request, res: Response) => {
       med_reg,
       qualifications,
       hospitals
-    });
+    };
+    doctorRegistry.push(targetDoc);
   }
+  saveDoctorToFirestore(targetDoc).catch(err => console.error(err));
   res.json({ success: true, doctors: doctorRegistry });
 });
 
-// Reset CRM store back to empty
-app.post('/api/patients/reset', (req: Request, res: Response) => {
-  patients = [];
+// Reset CRM store back to standard seeds
+app.post('/api/patients/reset', async (req: Request, res: Response) => {
+  patients = [...DEFAULT_SEED_PATIENTS];
   notifications = [];
+  try {
+    await resetFirestoreCollections();
+    for (const p of DEFAULT_SEED_PATIENTS) {
+      await savePatientToFirestore(p);
+    }
+  } catch (err) {
+    console.error("Error seeding during reset: ", err);
+  }
   res.json({ success: true, patients, notifications });
 });
 
@@ -128,14 +515,18 @@ app.post('/api/patients', (req: Request, res: Response) => {
   patients.push(newPatient);
 
   // Auto notify doctor
-  notifications.unshift({
+  const notif = {
     id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     patient_name: `${newPatient.first_name} ${newPatient.last_name}`,
     transitioned_to: newPatient.current_stage,
     action_by: 'Receptionist',
     summary: `Onboarded patient ${newPatient.first_name} ${newPatient.last_name} directly to ${newPatient.current_stage}.`
-  });
+  };
+  notifications.unshift(notif);
+
+  savePatientToFirestore(newPatient).catch(err => console.error(err));
+  saveNotificationToFirestore(notif).catch(err => console.error(err));
 
   res.json({ success: true, patient: newPatient });
 });
@@ -157,16 +548,50 @@ app.post('/api/patients/manual-update', (req: Request, res: Response) => {
   }
 
   // Create doctor notification
-  notifications.unshift({
+  const manualNotif = {
     id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     patient_name: `${patient.first_name} ${patient.last_name}`,
     transitioned_to: patient.current_stage,
     action_by: 'Staff/Doctor',
     summary: notes ? notes.replace(/Logged by.*?\|/, '').trim() : `Updated stage to ${patient.current_stage}.`
-  });
+  };
+  notifications.unshift(manualNotif);
+
+  savePatientToFirestore(patient).catch(err => console.error(err));
+  saveNotificationToFirestore(manualNotif).catch(err => console.error(err));
 
   res.json({ success: true, patient });
+});
+
+// Full update for patient details
+app.post('/api/patients/update-full', (req: Request, res: Response) => {
+  const patientData = req.body;
+  if (!patientData.patient_id) {
+    return res.status(400).json({ error: 'patient_id is required' });
+  }
+
+  const idx = patients.findIndex(p => p.patient_id === patientData.patient_id);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+
+  // Preserve history if not provided, otherwise merge
+  const existing = patients[idx];
+  const updatedPatient: Patient = {
+    ...existing,
+    ...patientData,
+    history: patientData.history || existing.history,
+    financials: {
+      ...existing.financials,
+      ...(patientData.financials || {})
+    }
+  };
+
+  patients[idx] = updatedPatient;
+  savePatientToFirestore(updatedPatient).catch(err => console.error(err));
+
+  res.json({ success: true, patient: updatedPatient });
 });
 
 // --------------------------------------------------------------------------
@@ -773,19 +1198,23 @@ app.post('/api/patients/update-treatment-plan', (req: Request, res: Response) =>
   patient.history.push(`Logged by Practice Staff | Treatment plan generated & shared with patient. Estimated Total: ₹${Number(grand_total).toLocaleString()}`);
 
   // Create senior doctor notification
-  notifications.unshift({
+  const notif = {
     id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     patient_name: `${patient.first_name} ${patient.last_name}`,
     transitioned_to: patient.current_stage,
     action_by: 'Practice Staff',
     summary: `Shared structured treatment plan costing ₹${Number(grand_total).toLocaleString()}.`
-  });
+  };
+  notifications.unshift(notif);
 
   // Limit notifications log size to 15
   if (notifications.length > 15) {
     notifications = notifications.slice(0, 15);
   }
+
+  savePatientToFirestore(patient).catch(err => console.error(err));
+  saveNotificationToFirestore(notif).catch(err => console.error(err));
 
   res.json({ success: true, patient });
 });
@@ -810,18 +1239,22 @@ app.post('/api/patients/update-full', (req: Request, res: Response) => {
   };
 
   // Add a doctor notification if status transitions
-  notifications.unshift({
+  const fullNotif = {
     id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     patient_name: `${patients[index].first_name} ${patients[index].last_name}`,
     transitioned_to: patients[index].current_stage,
     action_by: 'Staff Physician',
     summary: `Treatment configuration locked with payment mode: ${patients[index].selected_payment_mode || 'None SELECTED'}.`
-  });
+  };
+  notifications.unshift(fullNotif);
 
   if (notifications.length > 15) {
     notifications = notifications.slice(0, 15);
   }
+
+  savePatientToFirestore(patients[index]).catch(err => console.error(err));
+  saveNotificationToFirestore(fullNotif).catch(err => console.error(err));
 
   res.json({ success: true, patient: patients[index], notifications });
 });
@@ -838,6 +1271,7 @@ function synchronizePatientStore(updated: Patient) {
     }
     patients.push(updated);
   }
+  savePatientToFirestore(updated).catch(err => console.error(err));
 }
 
 // Generate notifications directly from clinical actions and stages
@@ -861,14 +1295,16 @@ function extractAndRecordNotification(patient: Patient, last_input: string) {
   }
 
   // Push new notification
-  notifications.unshift({
+  const newNotif = {
     id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     patient_name: `${patient.first_name} ${patient.last_name}`,
     transitioned_to: patient.current_stage,
     action_by,
     summary
-  });
+  };
+  notifications.unshift(newNotif);
+  saveNotificationToFirestore(newNotif).catch(err => console.error(err));
 
   // Limit notifications log size to 15
   if (notifications.length > 15) {
@@ -1328,6 +1764,22 @@ app.post('/api/auth/register-complete', (req: Request, res: Response) => {
 
   registeredUsers.push(newUser);
   delete otpSessions[email.toLowerCase()];
+
+  // Persist newly registered user in Postgres SQL Table
+  db.insert(schema.users).values({
+    id: email.toLowerCase(),
+    email: email.toLowerCase(),
+    mobileNo: mobile_no,
+    firstName: first_name,
+    lastName: last_name,
+    gender,
+    ageDob: age_dob.includes('years old') ? age_dob : `${age_dob} years old`,
+    type: role,
+  }).then(() => {
+    console.log(`Saved newly onboarded user ${email} directly to SQL Database.`);
+  }).catch(err => {
+    console.error(`SQL user insertion failed for ${email}:`, err);
+  });
 
   console.log(`[AUTH DEMO] Finished Onboarding: ${newUser.first_name} ${newUser.last_name} (${newUser.type})`);
 

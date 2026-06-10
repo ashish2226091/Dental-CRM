@@ -21,12 +21,13 @@ import {
   Plus,
   Trash2
 } from 'lucide-react';
-import { Patient, PatientStage, DoctorNotification } from './types';
+import { Patient, PatientStage, DoctorNotification, TreatmentPlan } from './types';
 import ReactMarkdown from 'react-markdown';
 import LoginOnboarding from './components/LoginOnboarding';
 import MDCommandTerminal from './components/MDCommandTerminal';
 import MasterDirectory from './components/MasterDirectory';
 import PatientDeepDive from './components/PatientDeepDive';
+import OPDBillingDashboard from './components/OPDBillingDashboard';
 
 const SYSTEM_DENTAL_PROCEDURES = [
   { id: 'scaling', name: 'Scaling & Polishing', rate: 1000, is_custom: false },
@@ -96,7 +97,9 @@ export default function App() {
   const [aiInputText, setAiInputText] = useState<string>('');
 
   // Custom navigation views for senior doctor
-  const [activeView, setActiveView] = useState<'PAGE_1' | 'PAGE_2'>('PAGE_1');
+  const [activeView, setActiveView] = useState<'PAGE_1' | 'PAGE_2' | 'PAGE_3'>('PAGE_1');
+  const [deepDiveActiveTab, setDeepDiveActiveTab] = useState<'PLAN' | 'PROGRESS'>('PLAN');
+  const [showPrintPreview, setShowPrintPreview] = useState<boolean>(false);
   const [commandInput, setCommandInput] = useState('');
   const [commandSuccess, setCommandSuccess] = useState('');
   const [commandError, setCommandError] = useState('');
@@ -109,11 +112,199 @@ export default function App() {
     setCommandError('');
 
     try {
+      // CLI COMMAND: Open workspace & select tab
+      const workspaceTabMatch = text.match(/^open\s+workspace\s+for\s+([^.]+?)\.\s*select\s+the\s+'([^']+?)'\s+tab(?: on the left)?/i) || text.match(/^open\s+workspace\s+for\s+([^.]+?)$/i);
+      if (workspaceTabMatch) {
+        const targetName = workspaceTabMatch[1].trim().toLowerCase();
+        const tabName = workspaceTabMatch[2] ? workspaceTabMatch[2].trim().toLowerCase() : '';
+
+        const matched = patients.find(p => 
+          `${p.first_name} ${p.last_name}`.toLowerCase() === targetName ||
+          p.first_name.toLowerCase() === targetName ||
+          p.last_name.toLowerCase() === targetName
+        );
+
+        if (matched) {
+          setSelectedPatient(matched);
+          setActiveView('PAGE_2');
+          setShowPrintPreview(false);
+          if (tabName) {
+            if (tabName.includes('progress') || tabName.includes('execution') || tabName.includes('progress')) {
+              setDeepDiveActiveTab('PROGRESS');
+            } else {
+              setDeepDiveActiveTab('PLAN');
+            }
+            setCommandSuccess(`Successfully deep dived into patient: ${matched.first_name} ${matched.last_name}, selecting left workspace '${tabName}' tab.`);
+          } else {
+            setCommandSuccess(`Successfully deep dived into patient: ${matched.first_name} ${matched.last_name}`);
+          }
+          setCommandInput('');
+        } else {
+          setCommandError(`Patient "${workspaceTabMatch[1]}" not found in database.`);
+        }
+        return;
+      }
+
+      // CLI COMMAND: Switch to tab and log visit step
+      const switchAndLogMatch = text.match(/^switch\s+to\s+the\s+'([^']+?)'\s+tab(?: on the left)?\s+and\s+log\s+visit\s+(\d+):\s*(.+?),\s*step:\s*(.+?),\s*teeth:\s*(.+?),\s*conducted\s+by:\s*(.+?)(?:\.|$)/i);
+      if (switchAndLogMatch) {
+        if (!selectedPatient) {
+          setCommandError('No active patient selected. Open a patient workspace first.');
+          return;
+        }
+        const tabName = switchAndLogMatch[1].trim();
+        const visitNumber = switchAndLogMatch[2].trim();
+        const visitDateStr = switchAndLogMatch[3].trim();
+        const visitStepVal = switchAndLogMatch[4].trim();
+        const visitTeethRaw = switchAndLogMatch[5].trim();
+        const visitConductedByVal = switchAndLogMatch[6].trim();
+
+        if (tabName.toLowerCase().includes('progress') || tabName.toLowerCase().includes('execution')) {
+          setDeepDiveActiveTab('PROGRESS');
+        } else {
+          setDeepDiveActiveTab('PLAN');
+        }
+
+        const teethArr = visitTeethRaw.split(/[\s,]+/)[0] ? visitTeethRaw.split(/[\s,]+/).map(t => parseInt(t.trim(), 10)).filter(t => !isNaN(t)) : [];
+
+        let activePlans = selectedPatient.active_treatment_plans || [];
+        if (activePlans.length === 0) {
+          const defaultPlan: TreatmentPlan = {
+            plan_id: 'plan_' + Math.floor(1000 + Math.random() * 9000),
+            plan_name: `${visitStepVal} Bundle`,
+            status: 'Treatment in Progress',
+            billing_items: [
+              {
+                tooth_no: teethArr.length > 0 ? teethArr : [14],
+                procedure_name: visitStepVal,
+                base_rate: 1000,
+                count: teethArr.length > 0 ? teethArr.length : 1,
+                discount_percent: 0,
+                gst_percent: 18,
+                final_total: 1180
+              }
+            ],
+            visit_logs: []
+          };
+          activePlans = [defaultPlan];
+        }
+
+        const newLogVec = {
+          visit_id: 'visit_' + Math.floor(1000 + Math.random() * 9000),
+          visit_number: `V${visitNumber}`,
+          date: visitDateStr.toLowerCase() === "today's date" ? new Date().toISOString().split('T')[0] : visitDateStr,
+          procedure_step: visitStepVal,
+          assigned_teeth: teethArr,
+          conducted_by: visitConductedByVal,
+          assisted_by: 'Nurse Sarah',
+          remarks: 'Appended via Staff AI terminal controller.'
+        };
+
+        const updatedPlans = activePlans.map((p, idx) => {
+          if (idx === 0) {
+            return {
+              ...p,
+              visit_logs: [...(p.visit_logs || []), newLogVec]
+            };
+          }
+          return p;
+        });
+
+        const timelineNote = `Logged by Staff Operation | Appended visit V${visitNumber} (${visitStepVal}) for teeth ${visitTeethRaw} on ${newLogVec.date} conducted by ${visitConductedByVal}.`;
+
+        const updatedPatient = {
+          ...selectedPatient,
+          active_treatment_plans: updatedPlans,
+          current_stage: 'STAGE_4: TREATMENT_ACCEPTED' as PatientStage,
+          history: [...(selectedPatient.history || []), timelineNote]
+        };
+
+        const response = await fetch('/api/patients/update-full', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedPatient)
+        });
+
+        if (response.ok) {
+          const resData = await response.json();
+          await fetchCRMData();
+          setSelectedPatient(resData.patient);
+          setCommandSuccess(`Swapped Left Panel tab to "${tabName}" and successfully appended Visit ${visitNumber} to Active Treatment Progress.`);
+          setCommandInput('');
+        } else {
+          setCommandError('Failed to synchronize and save visit log on cloud datastore.');
+        }
+        return;
+      }
+
+      // CLI COMMAND: Click Finish Treatment
+      const finishMatch = text.match(/^click\s+finish\s+treatment\s+for\s+patient\s+(.+)$/i);
+      if (finishMatch) {
+        const targetName = finishMatch[1].trim().toLowerCase();
+        const matched = patients.find(p => 
+          `${p.first_name} ${p.last_name}`.toLowerCase() === targetName ||
+          p.first_name.toLowerCase() === targetName ||
+          p.last_name.toLowerCase() === targetName
+        );
+
+        if (matched) {
+          setSelectedPatient(matched);
+          setActiveView('PAGE_2');
+          setShowPrintPreview(true);
+          setCommandSuccess(`Triggered treatment completion for ${matched.first_name} ${matched.last_name}. Rendering printable Summary Report Sheet.`);
+          setCommandInput('');
+        } else {
+          setCommandError(`Patient "${finishMatch[1]}" not found.`);
+        }
+        return;
+      }
+
+      // CLI COMMAND: Print Completed
+      if (/^print\s+completed$/i.test(text)) {
+        if (!selectedPatient) {
+          setCommandError('No patient context active for print operations.');
+          return;
+        }
+
+        const timelineNote = `Logged by billing system | Completed native browser printing workflow. Treatment plan closed officially and session variables flushed safely out of memory tree.`;
+        const updatedPatient = {
+          ...selectedPatient,
+          current_stage: 'STAGE_6_CLOSED' as any,
+          history: [...(selectedPatient.history || []), timelineNote]
+        };
+
+        const response = await fetch('/api/patients/update-full', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedPatient)
+        });
+
+        if (response.ok) {
+          await fetchCRMData();
+          setSelectedPatient(null);
+          setShowPrintPreview(false);
+          setActiveView('PAGE_1');
+          setCommandSuccess('Print job finalized. Database records synchronized to Stage 6 (Treatment Closed). Returned safely to live pipeline stream.');
+          setCommandInput('');
+        } else {
+          setCommandError('Failed to execute database lifecycle updates.');
+        }
+        return;
+      }
+
       // 1. Back to Directory
       if (/^back\s+to\s+directory$/i.test(text)) {
         setSelectedPatient(null);
         setActiveView('PAGE_1');
         setCommandSuccess('Navigated back to Master Patient Directory.');
+        setCommandInput('');
+        return;
+      }
+
+      // 1b. Open OPD Billing Module
+      if (/^open\s+opd\s+billing/i.test(text) || /^audit\s+transactions/i.test(text) || /^opd\s+billing$/i.test(text) || /^show\s+opd\s+billing/i.test(text)) {
+        setActiveView('PAGE_3');
+        setCommandSuccess('Navigated to OPD Billing module dashboard. Rendering 4 cash flow metrics and transaction ledger.');
         setCommandInput('');
         return;
       }
@@ -917,55 +1108,97 @@ export default function App() {
       </header>
 
       {/* 2. SUPER ADMIN DOCTOR KPIs PILLS */}
-      <section id="crm-metrics-strip" className="max-w-7xl mx-auto w-full pt-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-          
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Est. Case Value</p>
-              <h3 className="text-2xl font-bold font-display text-slate-800 mt-1">₹{totalCostPortfolio.toLocaleString()}</h3>
-              <p className="text-[11px] text-slate-400 font-medium mt-0.5">{patients.length} Registered Patients</p>
+      {activeView === 'PAGE_1' && (
+        <section id="crm-metrics-strip" className="max-w-7xl mx-auto w-full pt-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Est. Case Value</p>
+                <h3 className="text-2xl font-bold font-display text-slate-800 mt-1">₹{totalCostPortfolio.toLocaleString()}</h3>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">{patients.length} Registered Patients</p>
+              </div>
+              <div className="h-10 w-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <TrendingUp className="h-5 w-5" />
+              </div>
             </div>
-            <div className="h-10 w-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-              <TrendingUp className="h-5 w-5" />
-            </div>
-          </div>
 
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Realized Income (Collected)</p>
-              <h3 className="text-2xl font-bold font-display text-emerald-600 mt-1">₹{realizedRevenue.toLocaleString()}</h3>
-              <p className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md inline-block mt-1 font-bold">Paid + Month 1 EMIs</p>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Realized Income (Collected)</p>
+                <h3 className="text-2xl font-bold font-display text-emerald-600 mt-1">₹{realizedRevenue.toLocaleString()}</h3>
+                <p className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md inline-block mt-1 font-bold">Paid + Month 1 EMIs</p>
+              </div>
+              <div className="h-10 w-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                <DollarSign className="h-5 w-5" />
+              </div>
             </div>
-            <div className="h-10 w-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
-              <DollarSign className="h-5 w-5" />
-            </div>
-          </div>
 
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">EMI Book Value (Deferred)</p>
-              <h3 className="text-2xl font-bold font-display text-indigo-600 mt-1">₹{emiPortfolioValue.toLocaleString()}</h3>
-              <p className="text-[11px] text-slate-400 font-medium mt-0.5">Active Monthly Installments</p>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">EMI Book Value (Deferred)</p>
+                <h3 className="text-2xl font-bold font-display text-indigo-600 mt-1">₹{emiPortfolioValue.toLocaleString()}</h3>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5">Active Monthly Installments</p>
+              </div>
+              <div className="h-10 w-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <CheckCircle className="h-5 w-5" />
+              </div>
             </div>
-            <div className="h-10 w-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-              <CheckCircle className="h-5 w-5" />
-            </div>
-          </div>
 
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Pending Treatments Overdue</p>
-              <h3 className="text-2xl font-bold font-display text-slate-700 mt-1">₹{pendingRecovery.toLocaleString()}</h3>
-              <p className="text-[11px] text-slate-400 font-medium mt-0.5 font-sans">Outstanding in pipeline</p>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Pending Treatments Overdue</p>
+                <h3 className="text-2xl font-bold font-display text-slate-700 mt-1">₹{pendingRecovery.toLocaleString()}</h3>
+                <p className="text-[11px] text-slate-400 font-medium mt-0.5 font-sans">Outstanding in pipeline</p>
+              </div>
+              <div className="h-10 w-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center">
+                <Clock className="h-5 w-5" />
+              </div>
             </div>
-            <div className="h-10 w-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center">
-              <Clock className="h-5 w-5" />
-            </div>
-          </div>
 
+          </div>
+        </section>
+      )}
+
+      {/* Dynamic CRM View Navigation Tabs */}
+      <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 mt-5">
+        <div className="bg-slate-100/80 p-1.5 rounded-2xl flex items-center gap-2 max-w-sm border border-slate-200 shadow-xs">
+          <button
+            onClick={() => {
+              setActiveView('PAGE_1');
+              setSelectedPatient(null);
+            }}
+            className={`flex-1 py-2 text-xs font-black rounded-xl transition-all border-0 outline-none cursor-pointer ${
+              activeView === 'PAGE_1'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 font-bold'
+            }`}
+          >
+            📋 Directory
+          </button>
+          <button
+            disabled={!selectedPatient}
+            onClick={() => setActiveView('PAGE_2')}
+            className={`flex-1 py-2 text-xs font-black rounded-xl transition-all border-0 outline-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+              activeView === 'PAGE_2'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 font-bold'
+            }`}
+          >
+            👤 Dossier
+          </button>
+          <button
+            onClick={() => setActiveView('PAGE_3')}
+            className={`flex-1 py-2 text-xs font-black rounded-xl transition-all border-0 outline-none cursor-pointer ${
+              activeView === 'PAGE_3'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900 font-bold'
+            }`}
+          >
+            📊 OPD Billing
+          </button>
         </div>
-      </section>
+      </div>
 
 
 
@@ -984,10 +1217,14 @@ export default function App() {
               }}
               onOpenOnboardModal={() => setShowAddModal(true)}
             />
-          ) : (
+          ) : activeView === 'PAGE_2' ? (
             selectedPatient && (
               <PatientDeepDive
                 selectedPatient={selectedPatient}
+                activeTab={deepDiveActiveTab}
+                onChangeTab={setDeepDiveActiveTab}
+                showPrintPreview={showPrintPreview}
+                setShowPrintPreview={setShowPrintPreview}
                 onBackToDirectory={() => {
                   setSelectedPatient(null);
                   setActiveView('PAGE_1');
@@ -1032,6 +1269,17 @@ export default function App() {
                 }}
               />
             )
+          ) : (
+            <OPDBillingDashboard
+              patients={patients}
+              onSelectPatient={(p) => {
+                setSelectedPatient(p);
+                setActiveView('PAGE_2');
+                setAiResponseMarkdown('');
+              }}
+              onNavigateToView={setActiveView}
+              onRefreshData={fetchCRMData}
+            />
           )}
         </div>
 

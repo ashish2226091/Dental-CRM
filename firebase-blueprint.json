@@ -1,0 +1,174 @@
+{
+  "entities": {
+    "Patient": {
+      "title": "Patient",
+      "description": "Patient CRM Profile and Journey Structure",
+      "type": "object",
+      "properties": {
+        "patient_id": {
+          "type": "string"
+        },
+        "salutation": {
+          "type": "string"
+        },
+        "first_name": {
+          "type": "string"
+        },
+        "last_name": {
+          "type": "string"
+        },
+        "gender": {
+          "type": "string"
+        },
+        "mobile": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "dob": {
+          "type": "string"
+        },
+        "age_calculated": {
+          "type": "integer"
+        },
+        "age_dob": {
+          "type": "string"
+        },
+        "current_stage": {
+          "type": "string"
+        },
+        "history": {
+          "type": "array",
+          "description": "Timeline entries"
+        },
+        "financials": {
+          "type": "object",
+          "properties": {
+            "total_cost": {
+              "type": "number"
+            },
+            "payment_mode": {
+              "type": "string"
+            },
+            "payment_status": {
+              "type": "string"
+            },
+            "emi_months": {
+              "type": "integer"
+            },
+            "emi_monthly_amount": {
+              "type": "number"
+            }
+          }
+        },
+        "treatment_plan_markdown": {
+          "type": "string"
+        },
+        "treatment_plan_json": {
+          "type": "string"
+        },
+        "active_treatment_plans": {
+          "type": "array"
+        },
+        "selected_payment_mode": {
+          "type": "string"
+        },
+        "appointment_booking": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "patient_id",
+        "first_name",
+        "last_name",
+        "gender",
+        "age_dob",
+        "current_stage"
+      ]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Doctor metadata registry item",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "specialty": {
+          "type": "string"
+        },
+        "fees": {
+          "type": "number"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "med_reg": {
+          "type": "string"
+        },
+        "qualifications": {
+          "type": "string"
+        },
+        "hospitals": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "specialty",
+        "fees"
+      ]
+    },
+    "Notification": {
+      "title": "DoctorNotification",
+      "description": "Notification for senior doctors",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "patient_name": {
+          "type": "string"
+        },
+        "transitioned_to": {
+          "type": "string"
+        },
+        "action_by": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "patient_name",
+        "transitioned_to",
+        "action_by",
+        "summary"
+      ]
+    }
+  },
+  "firestore": {
+    "patients": {
+      "schema": "Patient",
+      "description": "CRM patient profiles and active case tracking data"
+    },
+    "doctors": {
+      "schema": "Doctor",
+      "description": "Registered doctors list with specialities and credentials"
+    },
+    "notifications": {
+      "schema": "Notification",
+      "description": "Real-time log of senior doctor clinical notifications"
+    }
+  }
+}

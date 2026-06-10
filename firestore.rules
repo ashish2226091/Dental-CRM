@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Global safety net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Global helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    
+    // 2. Validation blueprints for entities
+    function isValidPatient(data) {
+      return data.patient_id is string && data.patient_id.size() <= 128
+        && data.first_name is string && data.first_name.size() <= 128
+        && data.last_name is string && data.last_name.size() <= 128
+        && data.gender is string && data.gender.size() <= 128
+        && data.age_dob is string && data.age_dob.size() <= 128
+        && data.current_stage is string && data.current_stage.size() <= 256;
+    }
+    
+    function isValidDoctor(data) {
+      return data.name is string && data.name.size() <= 128
+        && data.specialty is string && data.specialty.size() <= 128
+        && data.fees is number && data.fees >= 0;
+    }
+    
+    function isValidNotification(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.timestamp is string && data.timestamp.size() <= 128
+        && data.patient_name is string && data.patient_name.size() <= 128
+        && data.transitioned_to is string && data.transitioned_to.size() <= 128
+        && data.action_by is string && data.action_by.size() <= 128
+        && data.summary is string && data.summary.size() <= 1000;
+    }
+    
+    // Collection matches
+    match /patients/{patientId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(patientId) && isValidPatient(request.resource.data);
+      allow update: if isSignedIn() && isValidId(patientId) && isValidPatient(request.resource.data);
+      allow delete: if isSignedIn() && isValidId(patientId);
+    }
+    
+    match /doctors/{doctorId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(doctorId) && isValidDoctor(request.resource.data);
+      allow delete: if isSignedIn() && isValidId(doctorId);
+    }
+    
+    match /notifications/{notificationId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(notificationId) && isValidNotification(request.resource.data);
+      allow delete: if isSignedIn() && isValidId(notificationId);
+    }
+  }
+}

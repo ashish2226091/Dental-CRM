@@ -6,7 +6,8 @@ export type PatientStage =
   | 'STAGE_2: APPOINTMENT_SCHEDULED'
   | 'STAGE_3: TREATMENT_PLAN_SHARED'
   | 'STAGE_4: TREATMENT_ACCEPTED'
-  | 'STAGE_5: PAYMENT_COMPLETED';
+  | 'STAGE_5: PAYMENT_COMPLETED'
+  | 'STAGE_6_CLOSED';
 
 /**
  * Financial breakdown structure
@@ -69,6 +70,8 @@ export interface Patient {
   treatment_plan_json?: string;
   active_treatment_plans?: TreatmentPlan[];
   selected_payment_mode?: string; // Cash, UPI, EMI, Clinic EMI, etc.
+  category?: string;              // General, VIP, Corporate, Diabetic
+  last_visit?: string;            // Last visit date formated DD-MM-YYYY
   appointment_booking?: {
     appointment_type: string; // In-Clinic Appointment, Video Consultation
     speciality: string;
