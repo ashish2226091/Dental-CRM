@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
-import { Patient, PatientStage, DoctorNotification } from './src/types';
+import { Patient, PatientStage, DoctorNotification, TreatmentPlan } from './src/types';
 import { db } from './src/db/index.ts';
 import * as schema from './src/db/schema.ts';
 
@@ -420,8 +420,26 @@ app.get('/api/patients', (req: Request, res: Response) => {
   res.json({ patients });
 });
 
-// Fetch all doctors in the registry
+// Fetch a single patient dossier complete with their treatment parameters and chronological log
+app.get('/api/patients/:id', (req: Request, res: Response) => {
+  const patient = patients.find(p => p.patient_id === req.params.id);
+  if (!patient) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+  res.json({ patient });
+});
+
+// Fetch all doctors in the registry (supports query parameter specialty filtering)
 app.get('/api/doctors', (req: Request, res: Response) => {
+  const { specialty } = req.query;
+  if (specialty) {
+    const list = doctorRegistry.filter(d => d.specialty.toLowerCase() === String(specialty).trim().toLowerCase());
+    return res.json({ doctors: list });
+  }
+  // If the query is specifically empty/null, default to empty or full list as requested
+  if (req.query.specialty === "") {
+    return res.json({ doctors: [] });
+  }
   res.json({ doctors: doctorRegistry });
 });
 
@@ -480,11 +498,356 @@ app.get('/api/notifications', (req: Request, res: Response) => {
   res.json({ notifications });
 });
 
+// 📥 POST /api/treatments/:patientId/plan - Create a custom treatment arrangement, calculate financial equations, and transition stage
+app.post('/api/treatments/:patientId/plan', (req: Request, res: Response) => {
+  const { patientId } = req.params;
+  const { paymentMode, billingItems, emiMonths, planName } = req.body;
+
+  const patient = patients.find(p => p.patient_id === patientId);
+  if (!patient) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+
+  if (!billingItems || !Array.isArray(billingItems)) {
+    return res.status(400).json({ error: 'billingItems array is required' });
+  }
+
+  let grandTotal = 0;
+  const processedItems = billingItems.map(item => {
+    const toothNo = item.toothNumbers || item.tooth_no || [];
+    const count = toothNo.length || 1;
+    const baseRate = Number(item.baseRate || item.base_rate) || 0;
+    const discountPercent = Number(item.discountPercent || item.discount_percent) || 0;
+    const gstPercent = Number(item.gstPercent || item.gst_percent) || 0;
+
+    // Formulas:
+    // Gross = BaseRate * Count
+    // Discounted = Gross - (Gross * DiscountPercent / 100)
+    // FinalTotal = Discounted + (Discounted * GSTPercent / 100)
+    const gross = baseRate * count;
+    const discounted = gross - (gross * discountPercent / 100);
+    const finalTotal = Math.round(discounted + (discounted * gstPercent / 100));
+
+    grandTotal += finalTotal;
+
+    return {
+      tooth_no: toothNo,
+      procedure_name: item.procedureName || item.procedure_name || 'Dental Procedure',
+      base_rate: baseRate,
+      count,
+      discount_percent: discountPercent,
+      gst_percent: gstPercent,
+      final_total: finalTotal
+    };
+  });
+
+  const planId = 'plan_' + Math.floor(1000 + Math.random() * 9000);
+  const paymentModeVal = paymentMode || 'Cash';
+  const months = Number(emiMonths) || 0;
+  const emiAmount = (paymentModeVal === 'EMI' || paymentModeVal === 'Clinic EMI') && months > 0 
+    ? Math.round(grandTotal / months) 
+    : 0;
+
+  const newPlan: TreatmentPlan = {
+    plan_id: planId,
+    plan_name: planName || 'Comprehensive Treatment Plan',
+    status: 'Treatment in Progress' as 'Treatment in Progress' | 'Treatment Done',
+    billing_items: processedItems,
+    visit_logs: []
+  };
+
+  if (!patient.active_treatment_plans) {
+    patient.active_treatment_plans = [];
+  }
+  patient.active_treatment_plans.push(newPlan);
+
+  // Update patient metrics
+  patient.current_stage = 'STAGE_4: TREATMENT_ACCEPTED';
+  patient.financials = {
+    total_cost: grandTotal,
+    payment_mode: paymentModeVal,
+    payment_status: (paymentModeVal === 'EMI' || paymentModeVal === 'Clinic EMI') ? 'Active EMI' : 'Pending',
+    emi_months: months,
+    emi_monthly_amount: emiAmount
+  };
+  patient.selected_payment_mode = paymentModeVal;
+
+  patient.history.push(`Logged by Dentist | Active treatment plan ${newPlan.plan_name} created. Payment mode locked to ${paymentModeVal}. Total value: ₹${grandTotal.toLocaleString()}`);
+
+  const notif = {
+    id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    patient_name: `${patient.first_name} ${patient.last_name}`,
+    transitioned_to: patient.current_stage,
+    action_by: 'Dentist',
+    summary: `Created and locked treatment plan worth ₹${grandTotal.toLocaleString()} on ${paymentModeVal}.`
+  };
+  notifications.unshift(notif);
+
+  savePatientToFirestore(patient).catch(err => console.error(err));
+  saveNotificationToFirestore(notif).catch(err => console.error(err));
+
+  res.json({ success: true, patient, plan: newPlan });
+});
+
+// 📥 POST /api/treatments/:patientId/visit - Log an ongoing treatment visit row
+app.post('/api/treatments/:patientId/visit', (req: Request, res: Response) => {
+  const { patientId } = req.params;
+  const { procedureStep, assignedTeeth, conductedBy, assistedBy, remarks, planId } = req.body;
+
+  const patient = patients.find(p => p.patient_id === patientId);
+  if (!patient) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+
+  if (!procedureStep) {
+    return res.status(400).json({ error: 'procedureStep is required' });
+  }
+
+  let targetPlan = patient.active_treatment_plans?.find(pl => pl.status === 'Treatment in Progress');
+  if (planId && patient.active_treatment_plans) {
+    targetPlan = patient.active_treatment_plans.find(pl => pl.plan_id === planId) || targetPlan;
+  }
+
+  if (!targetPlan) {
+    return res.status(400).json({ error: 'No active treatment plan in progress found.' });
+  }
+
+  const visitNumber = (targetPlan.visit_logs?.length || 0) + 1;
+  const newVisit = {
+    visit_id: 'visit_' + Math.floor(1000 + Math.random() * 9000),
+    visit_number: `V${visitNumber}`,
+    date: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
+    procedure_step: procedureStep,
+    assigned_teeth: assignedTeeth || [],
+    conducted_by: conductedBy || 'Dr. Sarah Jenkins',
+    assisted_by: assistedBy || 'Nurse Clara',
+    remarks: remarks || ''
+  };
+
+  if (!targetPlan.visit_logs) {
+    targetPlan.visit_logs = [];
+  }
+  targetPlan.visit_logs.push(newVisit);
+
+  const clinicalMsg = `Logged by clinical staff | Visit V${visitNumber} logged: ${procedureStep} on teeth [${newVisit.assigned_teeth.join(', ')}] by ${newVisit.conducted_by}. Remarks: "${newVisit.remarks}"`;
+  patient.history.push(clinicalMsg);
+
+  const notif = {
+    id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    patient_name: `${patient.first_name} ${patient.last_name}`,
+    transitioned_to: patient.current_stage,
+    action_by: conductedBy || 'Dentist',
+    summary: `Conducted clinical visit step: ${procedureStep} for ${patient.first_name}.`
+  };
+  notifications.unshift(notif);
+
+  savePatientToFirestore(patient).catch(err => console.error(err));
+  saveNotificationToFirestore(notif).catch(err => console.error(err));
+
+  res.json({ success: true, patient, visit: newVisit });
+});
+
+// 📥 POST /api/treatments/:patientId/finish - Flags treatment done and compiles parameters for Print Preview
+app.post('/api/treatments/:patientId/finish', (req: Request, res: Response) => {
+  const { patientId } = req.params;
+  const { planId } = req.body;
+
+  const patient = patients.find(p => p.patient_id === patientId);
+  if (!patient) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+
+  let targetPlan = patient.active_treatment_plans?.find(pl => pl.status === 'Treatment in Progress');
+  if (planId && patient.active_treatment_plans) {
+    targetPlan = patient.active_treatment_plans.find(pl => pl.plan_id === planId) || targetPlan;
+  }
+
+  if (!targetPlan) {
+    return res.status(400).json({ error: 'No active treatment plan found to finish.' });
+  }
+
+  targetPlan.status = 'Treatment Done';
+  patient.current_stage = 'STAGE_6_CLOSED';
+  
+  if (patient.financials) {
+    patient.financials.payment_status = 'Fully Paid';
+  }
+
+  patient.history.push(`Logged by Dentist | Treatment course successfully completed and marked as Done. Exported data for printable receipts.`);
+
+  const notif = {
+    id: 'notif_' + Math.floor(1000 + Math.random() * 9000),
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    patient_name: `${patient.first_name} ${patient.last_name}`,
+    transitioned_to: 'STAGE_6_CLOSED',
+    action_by: 'Practice Dentist',
+    summary: `Completed and successfully closed treatment case for ${patient.first_name} ${patient.last_name}.`
+  };
+  notifications.unshift(notif);
+
+  savePatientToFirestore(patient).catch(err => console.error(err));
+  saveNotificationToFirestore(notif).catch(err => console.error(err));
+
+  res.json({
+    success: true,
+    patient,
+    print_payload: {
+      patient_details: {
+        id: patient.patient_id,
+        name: `${patient.salutation || ''} ${patient.first_name} ${patient.last_name}`.trim(),
+        gender: patient.gender,
+        age: patient.age_calculated,
+        mobile: patient.mobile
+      },
+      plan_details: {
+        plan_id: targetPlan.plan_id,
+        plan_name: targetPlan.plan_name,
+        status: targetPlan.status,
+        billing_items: targetPlan.billing_items,
+        visit_logs: targetPlan.visit_logs
+      },
+      financial_summary: {
+        payment_mode: patient.financials.payment_mode,
+        payment_status: patient.financials.payment_status,
+        total_cost: patient.financials.total_cost,
+        emi_months: patient.financials.emi_months,
+        emi_monthly_amount: patient.financials.emi_monthly_amount
+      },
+      compiled_timestamp: new Date().toISOString()
+    }
+  });
+});
+
+// 📥 GET /api/billing/dashboard - Computes summary analytics of OPD Billing metrics
+app.get('/api/billing/dashboard', (req: Request, res: Response) => {
+  let totalEstCaseValue = 0;
+  let realizedIncome = 0;
+  let deferredEMIBookValue = 0;
+  let overdueBalance = 0;
+
+  for (const p of patients) {
+    const cost = p.financials?.total_cost || 0;
+    const mode = p.financials?.payment_mode || '';
+    const status = p.financials?.payment_status || '';
+    const emiMonths = p.financials?.emi_months || 0;
+    const emiAmount = p.financials?.emi_monthly_amount || 0;
+
+    totalEstCaseValue += cost;
+
+    if (status === 'Fully Paid' || status === 'STAGE_5: PAYMENT_COMPLETED') {
+      realizedIncome += cost;
+    } else if (mode === 'EMI' || mode === 'Clinic EMI' || mode === 'Clinic_EMI') {
+      const upfront = Math.round(cost * 0.25); // 25% downpayment
+      const month1Installment = emiAmount || Math.round((cost - upfront) / (emiMonths || 1));
+      const realized = upfront + month1Installment;
+      
+      realizedIncome += realized;
+      deferredEMIBookValue += Math.max(0, cost - realized);
+    } else if (status.toLowerCase().includes('pending') || status.toLowerCase().includes('unpaid')) {
+      overdueBalance += cost;
+    } else {
+      realizedIncome += cost;
+    }
+  }
+
+  res.json({
+    success: true,
+    metrics: {
+      totalEstCaseValue,
+      realizedIncome,
+      deferredEMIBookValue,
+      overdueBalance
+    }
+  });
+});
+
+// Exact copy on general endpoint to fully satisfy routing fallback
+app.get('/api/dashboard', (req: Request, res: Response) => {
+  let totalEstCaseValue = 0;
+  let realizedIncome = 0;
+  let deferredEMIBookValue = 0;
+  let overdueBalance = 0;
+
+  for (const p of patients) {
+    const cost = p.financials?.total_cost || 0;
+    const mode = p.financials?.payment_mode || '';
+    const status = p.financials?.payment_status || '';
+    const emiMonths = p.financials?.emi_months || 0;
+    const emiAmount = p.financials?.emi_monthly_amount || 0;
+
+    totalEstCaseValue += cost;
+
+    if (status === 'Fully Paid' || status === 'STAGE_5: PAYMENT_COMPLETED') {
+      realizedIncome += cost;
+    } else if (mode === 'EMI' || mode === 'Clinic EMI' || mode === 'Clinic_EMI') {
+      const upfront = Math.round(cost * 0.25);
+      const month1Installment = emiAmount || Math.round((cost - upfront) / (emiMonths || 1));
+      const realized = upfront + month1Installment;
+      
+      realizedIncome += realized;
+      deferredEMIBookValue += Math.max(0, cost - realized);
+    } else if (status.toLowerCase().includes('pending') || status.toLowerCase().includes('unpaid')) {
+      overdueBalance += cost;
+    } else {
+      realizedIncome += cost;
+    }
+  }
+
+  res.json({
+    success: true,
+    metrics: {
+      totalEstCaseValue,
+      realizedIncome,
+      deferredEMIBookValue,
+      overdueBalance
+    }
+  });
+});
+
 // Create a patient manually (standard fallback if needed)
 app.post('/api/patients', (req: Request, res: Response) => {
   const patientData = req.body;
+
+  // Interlock Rule: If Date of Birth (DoB) is filled, instantly disable manual Age field
+  // and auto-calculate age based on year 2026.
+  let ageCalculated = Number(patientData.age_calculated) || 0;
+  let ageDob = patientData.age_dob || 'N/A';
+
+  if (patientData.dob && String(patientData.dob).trim()) {
+    const dobStr = String(patientData.dob).trim();
+    let birthYear: number | null = null;
+    
+    const partsSlash = dobStr.split('/');
+    if (partsSlash.length === 3) {
+      birthYear = parseInt(partsSlash[2], 10);
+    } else {
+      const partsHyphen = dobStr.split('-');
+      if (partsHyphen.length === 3) {
+        if (partsHyphen[0].length === 4) {
+          birthYear = parseInt(partsHyphen[0], 10);
+        } else {
+          birthYear = parseInt(partsHyphen[2], 10);
+        }
+      }
+    }
+    
+    if (!birthYear || isNaN(birthYear)) {
+      const parsedDate = new Date(dobStr);
+      if (!isNaN(parsedDate.getTime())) {
+        birthYear = parsedDate.getFullYear();
+      }
+    }
+
+    if (birthYear && !isNaN(birthYear) && birthYear > 1900 && birthYear <= 2026) {
+      ageCalculated = 2026 - birthYear;
+      ageDob = `${ageCalculated} years old`;
+    }
+  }
+
   const newPatient: Patient = {
-    patient_id: generateId(),
+    patient_id: patientData.patient_id || generateId(),
     salutation: patientData.salutation || 'Mr.',
     first_name: patientData.first_name || 'Generic',
     last_name: patientData.last_name || 'Patient',
@@ -492,8 +855,8 @@ app.post('/api/patients', (req: Request, res: Response) => {
     mobile: patientData.mobile || '',
     email: patientData.email || '',
     dob: patientData.dob || '',
-    age_calculated: Number(patientData.age_calculated) || 0,
-    age_dob: patientData.age_dob || 'N/A',
+    age_calculated: ageCalculated,
+    age_dob: ageDob,
     current_stage: patientData.current_stage || 'STAGE_1: FOLLOW_UP',
     history: patientData.history || [`Logged by Clinic Clerk | Patient profile onboarded manually.`],
     financials: {
@@ -576,11 +939,48 @@ app.post('/api/patients/update-full', (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Patient not found' });
   }
 
-  // Preserve history if not provided, otherwise merge
+  // Interlock Rule: If Date of Birth (DoB) is filled, instantly disable manual Age field
+  // and auto-calculate age based on year 2026.
+  let ageCalculated = Number(patientData.age_calculated) || patients[idx].age_calculated || 0;
+  let ageDob = patientData.age_dob || patients[idx].age_dob || 'N/A';
+
+  if (patientData.dob && String(patientData.dob).trim()) {
+    const dobStr = String(patientData.dob).trim();
+    let birthYear: number | null = null;
+    
+    const partsSlash = dobStr.split('/');
+    if (partsSlash.length === 3) {
+      birthYear = parseInt(partsSlash[2], 10);
+    } else {
+      const partsHyphen = dobStr.split('-');
+      if (partsHyphen.length === 3) {
+        if (partsHyphen[0].length === 4) {
+          birthYear = parseInt(partsHyphen[0], 10);
+        } else {
+          birthYear = parseInt(partsHyphen[2], 10);
+        }
+      }
+    }
+    
+    if (!birthYear || isNaN(birthYear)) {
+      const parsedDate = new Date(dobStr);
+      if (!isNaN(parsedDate.getTime())) {
+        birthYear = parsedDate.getFullYear();
+      }
+    }
+
+    if (birthYear && !isNaN(birthYear) && birthYear > 1900 && birthYear <= 2026) {
+      ageCalculated = 2026 - birthYear;
+      ageDob = `${ageCalculated} years old`;
+    }
+  }
+
   const existing = patients[idx];
   const updatedPatient: Patient = {
     ...existing,
     ...patientData,
+    age_calculated: ageCalculated,
+    age_dob: ageDob,
     history: patientData.history || existing.history,
     financials: {
       ...existing.financials,
@@ -1231,10 +1631,48 @@ app.post('/api/patients/update-full', (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Patient not found' });
   }
 
+  // Interlock Rule: If Date of Birth (DoB) is filled, instantly disable manual Age field
+  // and auto-calculate age based on year 2026.
+  let ageCalculated = Number(updatedPatient.age_calculated) || patients[index].age_calculated || 0;
+  let ageDob = updatedPatient.age_dob || patients[index].age_dob || 'N/A';
+
+  if (updatedPatient.dob && String(updatedPatient.dob).trim()) {
+    const dobStr = String(updatedPatient.dob).trim();
+    let birthYear: number | null = null;
+    
+    const partsSlash = dobStr.split('/');
+    if (partsSlash.length === 3) {
+      birthYear = parseInt(partsSlash[2], 10);
+    } else {
+      const partsHyphen = dobStr.split('-');
+      if (partsHyphen.length === 3) {
+        if (partsHyphen[0].length === 4) {
+          birthYear = parseInt(partsHyphen[0], 10);
+        } else {
+          birthYear = parseInt(partsHyphen[2], 10);
+        }
+      }
+    }
+    
+    if (!birthYear || isNaN(birthYear)) {
+      const parsedDate = new Date(dobStr);
+      if (!isNaN(parsedDate.getTime())) {
+        birthYear = parsedDate.getFullYear();
+      }
+    }
+
+    if (birthYear && !isNaN(birthYear) && birthYear > 1900 && birthYear <= 2026) {
+      ageCalculated = 2026 - birthYear;
+      ageDob = `${ageCalculated} years old`;
+    }
+  }
+
   // Overwrite clinical fields safely while preserving fallback data where applicable
   patients[index] = {
     ...patients[index],
     ...updatedPatient,
+    age_calculated: ageCalculated,
+    age_dob: ageDob,
     history: updatedPatient.history || patients[index].history,
   };
 
